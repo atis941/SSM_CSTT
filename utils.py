@@ -8,11 +8,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import re
 from typing import Any, Dict, Iterable, Optional, Union, List
+import torchaudio
 
 ####### function for creating the VOCABULARY from the present dataset #######
+
+
 def build_phoneme_vocab(root_dir, save_dir=None):
     phoneme_set = set()
-    
+
     # iterate over the phoneme files and extract the phonemes
     for dirpath, _, filenames in os.walk(root_dir):
         for file in filenames:
@@ -24,7 +27,7 @@ def build_phoneme_vocab(root_dir, save_dir=None):
                         parts = line.strip().split()
                         phoneme = parts[2]
                         phoneme_set.add(phoneme)
-    
+
     # turn the list of extracted phonemes into a set -> for uniqueness
     phoneme_list = sorted(list(phoneme_set))
 
@@ -106,6 +109,95 @@ def collate_fn_ctc(batch: list) -> tuple:
 
     return padded_features, feature_lengths_original, concatenated_labels, label_lengths_original
 
+
+def collate_fn_ctc_time_domain_padding(batch: list,
+                                       mel_transform: torchaudio.transforms.MelSpectrogram,
+                                       hop_length: int) -> tuple:
+    """
+    Collate function for variable-length TIMIT samples.
+    Also calculates the mel spectrogram for the padded time audio samples
+
+    Parameters
+    ----------
+    batch : list
+        List of tuples (waveform_tensor: tensor, 
+                        original_waveform_length: tensor, 
+                        phoneme_labels: tensor):
+        - features has shape [T, max_waveform_length]
+        - original_waveform_length is a scalar tensor
+        - phoneme_labels has shape [number_of_labels]
+
+    mel_spectrogram: torchaudio.transforms.MelSpectrogram
+        the mel spectrogram function to turn the time domain samples into frequency domain features
+
+    hop_length: int
+        the hop length of the mel spectrogram. Necesary to be a parameter to calculate the length of the valid scpectrogram features
+
+    Returns
+    -------
+    tuple: 
+        1. element: mel_specs : torch.Tensor
+                    The spectrogram features -> inputs of the model
+                    Shape [B, T_max, 80]
+
+        2. element: orig_feature_lengths : torch.Tensor
+                    the original length of the spectrogram features without the padding -> input to ctc
+                    Shape [B]
+
+        3. element: concatenated_labels : torch.Tensor
+                    The concatenated labels -> input to ctc
+                    Shape [B, L_max]
+
+        4. element: label_lengths : torch.Tensor
+                    The label length of each feature in the batch -> input to ctc
+                    Shape [B]
+    """
+    # zip the batch
+    waveform_list, waveform_length_list, phoneme_label_list = zip(*batch)
+
+    # [B, 1, max_waveform_length]
+    waveform_batch = torch.stack(waveform_list, dim=0)
+
+    # [B]
+    waveform_length_batch = torch.stack(waveform_length_list, dim=0)
+
+    # Calculate Mel spectrogram from padded waveforms
+    # [B, 1, n_mels, T_max]
+    mel_specs = mel_transform(waveform_batch)
+
+    # Remove channel dimension:
+    # [B, 1, n_mels, T_max] -> [B, n_mels, T_max]
+    if mel_specs.dim() == 4:
+        mel_specs = mel_specs.squeeze(1)
+
+    # log compression -> mel spectrogram values can vary over several orders of magnitude.
+    # taking the logarithm, compresses this dynamic range and makes learning easier for the neural network
+    mel_specs = torch.log(mel_specs + 1e-6)
+
+    # Change shape for the model:
+    # [B, n_mels, T_max] -> [B, T_max, n_mels]
+    mel_specs = mel_specs.transpose(1, 2)
+
+    # Calculate real Mel lengths from original waveform lengths.
+    # This assumes center=True in MelSpectrogram.
+    orig_feature_lengths = waveform_length_batch // hop_length + 1
+
+    # Safety: CTC input lengths must not be larger than actual T_max
+    orig_feature_lengths = torch.clamp(
+        orig_feature_lengths, max=mel_specs.shape[1])
+
+    # Label lengths: [B]
+    label_lengths = torch.tensor(
+        [labels.shape[0] for labels in phoneme_label_list],
+        dtype=torch.long
+    )
+
+    # CTC expects concatenated labels, not padded labels
+    concatenated_labels = torch.cat(phoneme_label_list, dim=0)
+
+    return mel_specs, orig_feature_lengths, concatenated_labels, label_lengths
+
+
 ###### FUNCTTIONS for saving the results #####
 def make_json_serializable(obj: Any) -> Any:
     """
@@ -142,13 +234,13 @@ def make_json_serializable(obj: Any) -> Any:
 
 
 def save_training_result(
-    figures: Optional[Union[plt.Figure, Iterable[plt.Figure]]] = None,
-    model: Optional[torch.nn.Module] = None,
-    config: Optional[Dict[str, Any]] = None,
-    base_results_dir: str = "results",
-    model_filename: str = "ssm_model_state_dict.pt",
-    log_files: Optional[List[str]] = None,
-    config_filename: str = "run_config.json",) -> Path:
+        figures: Optional[Union[plt.Figure, Iterable[plt.Figure]]] = None,
+        model: Optional[torch.nn.Module] = None,
+        config: Optional[Dict[str, Any]] = None,
+        base_results_dir: str = "results",
+        model_filename: str = "ssm_model_state_dict.pt",
+        log_files: Optional[List[str]] = None,
+        config_filename: str = "run_config.json",) -> Path:
     """
     Create a new results/result_<n> directory and save:
       1. matplotlib figure(s)
@@ -200,7 +292,8 @@ def save_training_result(
             figures = [figures]
 
         for i, fig in enumerate(figures):
-            fig.savefig(result_dir / f"figure_{i}.png", dpi=300, bbox_inches="tight")
+            fig.savefig(
+                result_dir / f"figure_{i}.png", dpi=300, bbox_inches="tight")
             fig.savefig(result_dir / f"figure_{i}.pdf", bbox_inches="tight")
 
     # ---------- SAVE MODEL ----------
@@ -243,8 +336,6 @@ def ctc_greedy_decode(pred_ids, blank_idx=0):
 
     return decoded
 
-
-import torch
 
 def edit_distance(seq1, seq2, device=None):
     """
@@ -297,10 +388,10 @@ def edit_distance(seq1, seq2, device=None):
     return int(dp[m, n].item())
 
 
-def compute_batch_per_from_log_probs(log_probs, 
-                                     input_lengths, 
-                                     targets, 
-                                     target_lengths, 
+def compute_batch_per_from_log_probs(log_probs,
+                                     input_lengths,
+                                     targets,
+                                     target_lengths,
                                      blank_idx=0):
     """
     Compute PER statistics for one batch.
@@ -340,11 +431,13 @@ def compute_batch_per_from_log_probs(log_probs,
         current_target_length = int(target_lengths[b].item())
 
         # predicted sequence for one utterance
-        pred_ids = pred_ids_batch[b, :current_input_length].detach().cpu().tolist()
+        pred_ids = pred_ids_batch[b,
+                                  :current_input_length].detach().cpu().tolist()
         decoded_pred = ctc_greedy_decode(pred_ids, blank_idx=blank_idx)
 
         # target sequence for one utterance
-        target_seq = targets[target_offset:target_offset + current_target_length].detach().cpu().tolist()
+        target_seq = targets[target_offset:target_offset +
+                             current_target_length].detach().cpu().tolist()
         target_offset += current_target_length
 
         # edit distance
@@ -353,9 +446,11 @@ def compute_batch_per_from_log_probs(log_probs,
         total_edit_distance += dist
         total_target_length += current_target_length
 
-    batch_per = total_edit_distance / total_target_length if total_target_length > 0 else 0.0
+    batch_per = total_edit_distance / \
+        total_target_length if total_target_length > 0 else 0.0
 
     return batch_per, total_edit_distance, total_target_length
+
 
 def decode_batch_to_phonemes(log_probs, input_lengths, targets, target_lengths, idx_to_phoneme, blank_idx=0):
     """
@@ -381,6 +476,7 @@ def decode_batch_to_phonemes(log_probs, input_lengths, targets, target_lengths, 
         decoded_results.append((pred_phonemes, tgt_phonemes))
 
     return decoded_results
+
 
 def log_message(msg, file_handle):
     print(msg)
