@@ -197,6 +197,66 @@ def collate_fn_ctc_time_domain_padding(batch: list,
 
     return mel_specs, orig_feature_lengths, concatenated_labels, label_lengths
 
+def collate_fn_ctc_time_domain_features_during_training(batch: list) -> tuple:
+    """
+    Collate already padded time-domain TIMIT waveforms for CTC.
+
+    Each dataset item contains:
+        waveform: [1, T_max]
+        original_waveform_length: scalar
+        phoneme_labels: [L]
+
+    Returns
+    -------
+    waveform_batch:
+        Time-domain model inputs with shape [B, T_max, 1]
+
+    waveform_lengths:
+        Original unpadded waveform lengths with shape [B]
+
+    concatenated_labels:
+        All target phoneme sequences concatenated into one tensor, shape
+        [sum(label_lengths)]
+
+    label_lengths:
+        Length of each target phoneme sequence, shape [B]
+    """
+
+    waveform_list, waveform_length_list, phoneme_label_list = zip(*batch)
+
+    # Each waveform: [1, T_max]
+    # Result: [B, 1, T_max]
+    waveform_batch = torch.stack(waveform_list, dim=0)
+
+    # Change to sequence-first feature representation:
+    # [B, 1, T_max] -> [B, T_max, 1]
+    waveform_batch = waveform_batch.transpose(1, 2)
+
+    # [B]
+    waveform_lengths = torch.stack(
+        waveform_length_list,
+        dim=0
+    ).to(dtype=torch.long)
+
+    # [B]
+    label_lengths = torch.tensor(
+        [labels.shape[0] for labels in phoneme_label_list],
+        dtype=torch.long
+    )
+
+    # [sum(label_lengths)]
+    concatenated_labels = torch.cat(
+        phoneme_label_list,
+        dim=0
+    )
+
+    return (
+        waveform_batch,
+        waveform_lengths,
+        concatenated_labels,
+        label_lengths
+    )
+
 
 ###### FUNCTTIONS for saving the results #####
 def make_json_serializable(obj: Any) -> Any:
