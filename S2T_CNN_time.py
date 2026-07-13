@@ -48,6 +48,13 @@ class S2T_CNN_time_V1(nn.Module):
                              stride=stride)
         self.bn4 = nn.BatchNorm2d(out_channels[3])
 
+        self.cn5 = nn.Conv2d(in_channels=in_channels[4],
+                             out_channels=out_channels[4],
+                             kernel_size=kernel_size,
+                             padding=padding,
+                             stride=stride)
+        self.bn5 = nn.BatchNorm2d(out_channels[4])
+
         ######## FULLY CONNECTED LAYERS  ########
         self.fc1 = nn.Linear(in_features=out_channels[-1],
                              out_features=vocab_size)
@@ -86,6 +93,13 @@ class S2T_CNN_time_V1(nn.Module):
 
         x = self.cn4(x)
         x = self.bn4(x)
+        x = F.relu(x)
+        x = F.max_pool2d(input=x,
+                         kernel_size=(1, 2),
+                         stride=(1, 2))
+
+        x = self.cn5(x)
+        x = self.bn5(x)
         x = F.relu(x)
         x = F.max_pool2d(input=x,
                          kernel_size=(1, 2),
