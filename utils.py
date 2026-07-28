@@ -250,7 +250,7 @@ def collate_fn_ctc_time_domain_features_during_training(batch: list) -> tuple:
         dim=0
     )
 
-    print(waveform_batch.shape)
+    #print("waveform batch time domain shape:", waveform_batch.shape)
 
     return (
         waveform_batch,
@@ -450,11 +450,11 @@ def edit_distance(seq1, seq2, device=None):
     return int(dp[m, n].item())
 
 
-def compute_batch_per_from_log_probs(log_probs,
-                                     input_lengths,
-                                     targets,
-                                     target_lengths,
-                                     blank_idx=0):
+def compute_batch_per_from_log_probs__inefficient(log_probs,
+                                                  input_lengths,
+                                                  targets,
+                                                  target_lengths,
+                                                  blank_idx=0):
     """
     Compute PER statistics for one batch.
 
@@ -538,6 +538,78 @@ def decode_batch_to_phonemes(log_probs, input_lengths, targets, target_lengths, 
         decoded_results.append((pred_phonemes, tgt_phonemes))
 
     return decoded_results
+
+def compute_batch_per_from_log_probs(
+    log_probs,
+    input_lengths,
+    targets,
+    target_lengths,
+    blank_idx=0
+):
+    """
+    Compute PER statistics for one batch.
+
+    All GPU-to-CPU transfers are performed once per batch rather than
+    once per utterance.
+    """
+
+    # Argmax does not need gradients.
+    with torch.no_grad():
+        pred_ids_batch = torch.argmax(
+            log_probs.detach(),
+            dim=-1
+        )
+
+    # Transfer everything to CPU once.
+    pred_ids_batch = pred_ids_batch.cpu()
+    input_lengths = input_lengths.cpu().tolist()
+    targets = targets.detach().cpu().tolist()
+    target_lengths = target_lengths.cpu().tolist()
+
+    total_edit_distance = 0
+    total_target_length = 0
+    target_offset = 0
+
+    for b, (current_input_length, current_target_length) in enumerate(
+        zip(input_lengths, target_lengths)
+    ):
+        # Prediction is already on CPU.
+        pred_ids = pred_ids_batch[
+            b, :current_input_length
+        ].tolist()
+
+        decoded_pred = ctc_greedy_decode(
+            pred_ids,
+            blank_idx=blank_idx
+        )
+
+        # targets is already a Python list.
+        target_seq = targets[
+            target_offset:
+            target_offset + current_target_length
+        ]
+
+        target_offset += current_target_length
+
+        dist = edit_distance(
+            decoded_pred,
+            target_seq
+        )
+
+        total_edit_distance += dist
+        total_target_length += current_target_length
+
+    batch_per = (
+        total_edit_distance / total_target_length
+        if total_target_length > 0
+        else 0.0
+    )
+
+    return (
+        float(batch_per),
+        int(total_edit_distance),
+        int(total_target_length)
+    )
 
 
 def log_message(msg, file_handle):
