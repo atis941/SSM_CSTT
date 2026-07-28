@@ -250,6 +250,8 @@ def collate_fn_ctc_time_domain_features_during_training(batch: list) -> tuple:
         dim=0
     )
 
+    print(waveform_batch.shape)
+
     return (
         waveform_batch,
         waveform_lengths,
