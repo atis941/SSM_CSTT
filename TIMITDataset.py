@@ -5,6 +5,70 @@ import torch
 import torchaudio
 
 
+TIMIT_61_TO_39 = {
+    "aa": "aa",
+    "ae": "ae",
+    "ah": "ah",
+    "ao": "aa",
+    "aw": "aw",
+    "ax": "ah",
+    "ax-h": "ah",
+    "axr": "er",
+    "ay": "ay",
+    "b": "b",
+    "bcl": "sil",
+    "ch": "ch",
+    "d": "d",
+    "dcl": "sil",
+    "dh": "dh",
+    "dx": "dx",
+    "eh": "eh",
+    "el": "l",
+    "em": "m",
+    "en": "n",
+    "eng": "ng",
+    "epi": "sil",
+    "er": "er",
+    "ey": "ey",
+    "f": "f",
+    "g": "g",
+    "gcl": "sil",
+    "h#": "sil",
+    "hh": "hh",
+    "hv": "hh",
+    "ih": "ih",
+    "ix": "ih",
+    "iy": "iy",
+    "jh": "jh",
+    "k": "k",
+    "kcl": "sil",
+    "l": "l",
+    "m": "m",
+    "n": "n",
+    "ng": "ng",
+    "nx": "n",
+    "ow": "ow",
+    "oy": "oy",
+    "p": "p",
+    "pau": "sil",
+    "pcl": "sil",
+    "q": None,
+    "r": "r",
+    "s": "s",
+    "sh": "sh",
+    "t": "t",
+    "tcl": "sil",
+    "th": "th",
+    "uh": "uh",
+    "uw": "uw",
+    "ux": "uw",
+    "v": "v",
+    "w": "w",
+    "y": "y",
+    "z": "z",
+    "zh": "sh",
+}
+
 class TIMITDataset(Dataset):
     def __init__(self,
                  csv_file: str,
@@ -12,7 +76,8 @@ class TIMITDataset(Dataset):
                  root_dir: str,
                  phoneme_to_idx_vocab: dict,
                  transform: any = None,
-                 apply_padding_on_time_domain: bool = True):
+                 apply_padding_on_time_domain: bool = True,
+                 phone_set: str = "61"):
         """Constructor of the class
 
         Parameters
@@ -35,6 +100,16 @@ class TIMITDataset(Dataset):
         apply_padding_on_time_domain: bool
             if True, then all the samples in the dataset will be saved into one big tensor, and all of them will be
             padded, before tranforming the data into spectrogram representation
+        
+        phone_set: str
+            Defines which TIMIT phoneme set should be used.
+
+            "61":
+                Use the original TIMIT phoneme labels.
+
+            "39":
+                Map the original TIMIT labels to the standard
+                39-phone evaluation set.
         """
 
         print(f"{train_or_test} Dataset creation process...")
@@ -48,6 +123,17 @@ class TIMITDataset(Dataset):
         self.orig_waveform_lengths = []
         self.apply_padding_on_time_domain = apply_padding_on_time_domain
         self.phonemes = []
+
+        # Option between using the different phoneme sets (numbers exclude blank symbol)
+        # original -> 61 phonemes
+        # reduced -> 39 phonemes
+        if phone_set not in {"61", "39"}:
+            raise ValueError(
+                f"Unsupported phone_set='{phone_set}'. "
+                "Expected either '61' or '39'."
+            )
+
+        self.phone_set = phone_set
 
         # check if the dataframe contains only train or test data
         self.check_dataset_for_pure_set_type()
@@ -63,7 +149,7 @@ class TIMITDataset(Dataset):
 
         # create the cache filenames for checking if they exist
         self.cache_file = os.path.join(
-            self.cache_dir, f"{train_or_test}_cache_statistics.pt")
+            self.cache_dir, f"{train_or_test}_{phone_set}_cache_statistics.pt")
 
         print("Creating the samples dictionary...")
         self.create_samples_dictionary()
@@ -96,7 +182,7 @@ class TIMITDataset(Dataset):
                 self.normalize_waveforms()
 
                 print(
-                    f"Save the processed data into {train_or_test}_cache_statistics.pt file...")
+                    f"Save the processed data into {train_or_test}_{phone_set}_cache_statistics.pt file...")
                 self.save_cache()
 
             print(f"{train_or_test} dataset created ")
@@ -167,6 +253,8 @@ class TIMITDataset(Dataset):
             "phonemes": self.phonemes,
             "mean": self.mean,
             "std": self.std,
+            "phone_set": self.phone_set,
+            "phoneme_to_idx_vocab": self.phoneme_to_idx_vocab,
         }
 
         torch.save(cache, self.cache_file)
@@ -198,8 +286,30 @@ class TIMITDataset(Dataset):
         -------
         None
         """
-        self.mean = self.waveforms.mean()
-        self.std = self.waveforms.std()
+        # self.waveforms shape: [num_recordings, 1, max_waveform_length] -> its already the padded stacked waveforms tensor
+        # self.orig_waveform_lengths shape: [num_recordings]
+
+        # Create an index for every temporal position. (so much index as the temporal indices of the longest audiowave)
+        time_indices = torch.arange(
+            self.waveforms.shape[-1], # number of temporal positions in the longest audiowave
+            device=self.waveforms.device
+        )
+
+        # Create a [num_waveforms, max_length] boolean mask by comparing every
+        # time index with each waveform's original length using broadcasting.
+        # True = real audio sample, False = padded position.
+        valid_mask = (
+            time_indices.unsqueeze(0)
+            < self.orig_waveform_lengths.to(self.waveforms.device).unsqueeze(1)
+        )
+
+        # # Remove the mono channel dimension and use the boolean mask to extract
+        # all real audio samples into one 1D tensor, excluding padded positions.
+        valid_samples = self.waveforms.squeeze(1)[valid_mask]
+
+        # Calculate statistics without padding.
+        self.mean = valid_samples.mean()
+        self.std = valid_samples.std()
 
         print(f"Dataset mean: {self.mean:.6f}")
         print(f"Dataset std: {self.std:.6f}")
@@ -236,7 +346,7 @@ class TIMITDataset(Dataset):
         """
         train_cache_path = os.path.join(
             self.cache_dir,
-            "TRAIN_cache_statistics.pt"
+            f"TRAIN_{self.phone_set}_cache_statistics.pt"
         )
 
         if not os.path.exists(train_cache_path):
@@ -251,24 +361,77 @@ class TIMITDataset(Dataset):
         self.std = train_cache_file["std"]
 
     def load_cache(self) -> None:
-        """Loads the cache if the cache file exist
+        cache = torch.load(
+            self.cache_file,
+            weights_only=False
+        )
 
-        Parameters
-        ----------
-        None
+        cached_phone_set = cache.get("phone_set")
 
-        Returns
-        -------
-        None
-        """
+        if cached_phone_set is None:
+            raise ValueError(
+                f"The cache file {self.cache_file} does not contain "
+                "phone_set information. Delete and recreate it."
+            )
 
-        cache = torch.load(self.cache_file, weights_only=False)
+        if cached_phone_set != self.phone_set:
+            raise ValueError(
+                f"Cache phone-set mismatch: requested "
+                f"'{self.phone_set}', cached '{cached_phone_set}'."
+            )
+
+        cached_vocab = cache.get("phoneme_to_idx_vocab")
+
+        if cached_vocab is None:
+            raise ValueError(
+            f"The cache file {self.cache_file} does not contain "
+            "vocabulary information. Delete and recreate it."
+        )
+
+        if cached_vocab != self.phoneme_to_idx_vocab:
+            raise ValueError(
+                "The cached vocabulary differs from the current vocabulary. "
+                "Delete and recreate the cache."
+            )
+
+        current_sample_ids = [
+            sample["base_name"]
+            for sample in self.samples
+        ]
+
+        cached_sample_ids = cache.get("sample_ids")
+
+        if cached_sample_ids is None:
+            raise ValueError(
+                f"The cache file {self.cache_file} does not contain "
+                "sample IDs. Delete and recreate it."
+            )
+
+        if cached_sample_ids != current_sample_ids:
+            raise ValueError(
+                "The cached samples do not match the current CSV dataset. "
+                "Delete and recreate the cache."
+            )
 
         self.waveforms = cache["waveforms"]
         self.orig_waveform_lengths = cache["orig_waveform_lengths"]
         self.phonemes = cache["phonemes"]
         self.mean = cache["mean"]
         self.std = cache["std"]
+
+        self.max_waveform_length = self.waveforms.shape[-1]
+
+        if self.waveforms.shape[0] != len(self.samples):
+            raise ValueError(
+                f"Cache contains {self.waveforms.shape[0]} waveforms, "
+                f"but the current dataset contains {len(self.samples)} samples."
+            )
+
+        if len(self.phonemes) != len(self.samples):
+            raise ValueError(
+                f"Cache contains {len(self.phonemes)} target sequences, "
+                f"but the current dataset contains {len(self.samples)} samples."
+            )
 
     def pad_all_time_domain_tensors(self) -> None:
         """Pads the waveform tensors to the same length, which is the length of the longest audio file
@@ -282,7 +445,7 @@ class TIMITDataset(Dataset):
         None
         """
         self.padded_waveforms = []
-        total_waveform_length = len(self.waveforms)
+        num_of_waveforms = len(self.waveforms)
 
         for idx, waveform in enumerate(self.waveforms):
 
@@ -299,8 +462,8 @@ class TIMITDataset(Dataset):
             # save all the phonemes in a list
             self.phonemes.append(phoneme_label)
 
-            if (idx + 1) % 100 == 0 or (idx + 1) == total_waveform_length:
-                print(f"{idx + 1}/{total_waveform_length} waveforms padded")
+            if (idx + 1) % 100 == 0 or (idx + 1) == num_of_waveforms:
+                print(f"{idx + 1}/{num_of_waveforms} waveforms padded")
 
     def create_samples_dictionary(self) -> None:
         """Processes the given dataset and creates the self.samples list where each element represents a sample as a dictionary in 
@@ -482,7 +645,7 @@ class TIMITDataset(Dataset):
     def load_phoneme_labels(self,
                             idx: int) -> torch.Tensor:
         """
-        Loads the phoneme labels
+        Loads the phoneme labels as integer indices
 
         Parameters
         ----------
@@ -498,21 +661,53 @@ class TIMITDataset(Dataset):
         # get the phoneme labels
         path_phoneme_file = self.samples[idx]["phoneme_path"]
 
-        phoneme_ids = []
+        # additional check for the phoneme file path
+        if not os.path.exists(path_phoneme_file):
+            raise FileNotFoundError(
+                f"Phoneme file does not exist: {path_phoneme_file}"
+            )
+
+        phoneme_ids: list[int] = []
+
+        
 
         # turning the phonemes into a list of integer numbers
-        if os.path.exists(path_phoneme_file):
-            with open(path_phoneme_file, "r") as f:
-                for line in f:
-                    phoneme_str = (line.strip().split())[-1]
-                    try:
-                        phoneme_ids.append(
-                            self.phoneme_to_idx_vocab[phoneme_str])
-                    except KeyError as k:
+        with open(path_phoneme_file, "r") as f:
+            for line in f:
+                original_phoneme_str = (line.strip().split())[-1]
+
+                # -------------------------------------------------
+                # Optional 61-to-39 mapping
+                # -------------------------------------------------
+                if self.phone_set == "39":
+                    if original_phoneme_str not in TIMIT_61_TO_39:
                         raise KeyError(
-                            f"No such key in the vocabulary as {phoneme_str}")
-        else:
-            raise Exception(f"Phoneme file {path_phoneme_file} does not exist")
+                            f"Phoneme '{original_phoneme_str}' is missing from "
+                            "TIMIT_61_TO_39."
+                        )
+        
+                    mapped_phoneme = TIMIT_61_TO_39[original_phoneme_str]
+        
+                    # The standard mapping removes q.
+                    if mapped_phoneme is None:
+                        continue
+        
+                    phoneme = mapped_phoneme
+        
+                else:
+                    phoneme = original_phoneme_str
+
+
+                # -------------------------------------------------
+                # Turn the phonemes into integers
+                # -------------------------------------------------
+                try:
+                    phoneme_ids.append(
+                        self.phoneme_to_idx_vocab[phoneme])
+                except KeyError as k:
+                    raise KeyError(
+                        f"No such key in the vocabulary as {phoneme}")
+        
 
         # turning the list of integers into a 1D tensor of integers
         phoneme_labels = torch.tensor(phoneme_ids, dtype=torch.long)

@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import re
 from typing import Any, Dict, Iterable, Optional, Union, List
 import torchaudio
+import numpy as np
+import editdistance
 
 ####### function for creating the VOCABULARY from the present dataset #######
 
@@ -250,8 +252,6 @@ def collate_fn_ctc_time_domain_features_during_training(batch: list) -> tuple:
         dim=0
     )
 
-    #print("waveform batch time domain shape:", waveform_batch.shape)
-
     return (
         waveform_batch,
         waveform_lengths,
@@ -259,6 +259,148 @@ def collate_fn_ctc_time_domain_features_during_training(batch: list) -> tuple:
         label_lengths
     )
 
+
+def calculate_phoneme_mel_statistics(
+    mel_spectrogram,
+    phoneme_intervals,
+    hop_length,
+    sample_rate
+):
+    """
+    Calculate the average Mel value of every Mel-frequency
+    band during each phoneme interval.
+
+    Parameters
+    ----------
+    mel_spectrogram : torch.Tensor
+        Shape [T, n_mels]
+
+    phoneme_intervals : list[dict]
+        Output of load_phoneme_intervals().
+
+    hop_length : int
+        Mel spectrogram hop length in waveform samples.
+
+    sample_rate : int
+        Audio sample rate.
+
+    Returns
+    -------
+    list[dict]
+        Statistics for every phoneme occurrence.
+    """
+
+    time_step_seconds = (
+        hop_length / sample_rate
+    )
+
+    phoneme_mel_statistics = []
+
+
+    for interval in phoneme_intervals:
+
+        phoneme = interval["phoneme"]
+        start_time = interval["start_time"]
+        end_time = interval["end_time"]
+
+
+        #######################################################
+        # Convert time interval → Mel-frame indices
+
+        start_frame = int(
+            np.ceil(start_time / time_step_seconds)
+        )
+
+        end_frame = int(
+            np.ceil(end_time / time_step_seconds)
+        )
+
+
+        #######################################################
+        # Make sure indices stay inside the spectrogram
+        start_frame = max(
+            0,
+            min(start_frame, mel_spectrogram.shape[0])
+        )
+
+        end_frame = max(
+            start_frame,
+            min(end_frame, mel_spectrogram.shape[0])
+        )
+
+
+        #######################################################
+        # Select all Mel frames belonging to this phoneme
+        #
+        # Shape:
+        #
+        # [number_of_phoneme_frames, 80]
+
+        phoneme_mel = mel_spectrogram[
+            start_frame:end_frame,
+            :
+        ]
+
+
+        #######################################################
+        # Average across TIME
+        #
+        # [N_frames, 80]
+        #        ↓
+        #      [80]
+
+        if phoneme_mel.shape[0] > 0:
+
+            average_mel_values = (
+                phoneme_mel.mean(dim=0)
+            )
+
+            strongest_mel_bin = int(
+                torch.argmax(
+                    average_mel_values
+                ).item()
+            )
+
+            strongest_average_value = float(
+                average_mel_values[
+                    strongest_mel_bin
+                ].item()
+            )
+
+        else:
+
+            average_mel_values = None
+            strongest_mel_bin = None
+            strongest_average_value = None
+
+
+        #######################################################
+
+        phoneme_mel_statistics.append({
+
+            "phoneme": phoneme,
+
+            "start_time": start_time,
+            "end_time": end_time,
+
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+
+            "number_of_frames":
+                end_frame - start_frame,
+
+            "average_mel_values":
+                average_mel_values,
+
+            "strongest_mel_bin":
+                strongest_mel_bin,
+
+            "strongest_average_value":
+                strongest_average_value
+        })
+
+
+    return phoneme_mel_statistics
 
 ###### FUNCTTIONS for saving the results #####
 def make_json_serializable(obj: Any) -> Any:
@@ -293,6 +435,67 @@ def make_json_serializable(obj: Any) -> Any:
 
     # fallback
     return str(obj)
+
+def load_phoneme_intervals(phn_file_path: str,
+                           sample_rate: int = 16000) -> list[dict]:
+    """
+    Load phoneme intervals from a TIMIT .PHN file.
+
+    Each line of the PHN file has the form:
+
+        start_sample end_sample phoneme
+
+    Example:
+
+        11240 12783 iy
+
+    The sample positions are converted to seconds.
+
+    Returns
+    -------
+    phoneme_intervals : list of dictionaries
+
+        Example element:
+
+        {
+            "phoneme": "iy",
+            "start_sample": 11240,
+            "end_sample": 12783,
+            "start_time": 0.7025,
+            "end_time": 0.7989375
+        }
+    """
+
+    phoneme_intervals = []
+
+    with open(phn_file_path, "r") as phn_file:
+
+        for line in phn_file:
+
+            start_sample, end_sample, phoneme = (
+                line.strip().split()
+            )
+
+            start_sample = int(start_sample)
+            end_sample = int(end_sample)
+
+            start_time = (
+                start_sample / sample_rate
+            )
+
+            end_time = (
+                end_sample / sample_rate
+            )
+
+            phoneme_intervals.append({
+                "phoneme": phoneme,
+                "start_sample": start_sample,
+                "end_sample": end_sample,
+                "start_time": start_time,
+                "end_time": end_time
+            })
+
+    return phoneme_intervals
 
 
 def save_training_result(
@@ -399,6 +602,188 @@ def ctc_greedy_decode(pred_ids, blank_idx=0):
     return decoded
 
 
+def ctc_greedy_decode_ids( # for the inference and feature maps cell
+    prediction_ids,
+    blank_index=0
+):
+    """
+    Collapse repeated CTC predictions and remove blank tokens.
+
+    Example:
+        [0, 5, 5, 0, 8, 8, 8, 3]
+
+    becomes:
+        [5, 8, 3]
+    """
+
+    decoded_ids = []
+    previous_id = None
+
+    for current_id in prediction_ids:
+
+        if (
+            current_id != blank_index
+            and current_id != previous_id
+        ):
+            decoded_ids.append(current_id)
+
+        previous_id = current_id
+
+    return decoded_ids
+
+def align_phoneme_sequences( # for inference and feature maps cells
+    predicted,
+    target
+):
+    """
+    Align predicted and target phoneme sequences using
+    Levenshtein dynamic programming.
+    """
+
+    num_target = len(target)
+    num_predicted = len(predicted)
+
+    distance = [
+        [0] * (num_predicted + 1)
+        for _ in range(num_target + 1)
+    ]
+
+    for target_index in range(num_target + 1):
+        distance[target_index][0] = target_index
+
+    for predicted_index in range(num_predicted + 1):
+        distance[0][predicted_index] = predicted_index
+
+    # ---------------------------------------------------------
+    # Calculate edit-distance matrix
+    # ---------------------------------------------------------
+
+    for target_index in range(1, num_target + 1):
+
+        for predicted_index in range(1, num_predicted + 1):
+
+            target_phoneme = target[target_index - 1]
+            predicted_phoneme = predicted[predicted_index - 1]
+
+            substitution_cost = (
+                0
+                if target_phoneme == predicted_phoneme
+                else 1
+            )
+
+            distance[target_index][predicted_index] = min(
+
+                # deletion
+                distance[target_index - 1][predicted_index] + 1,
+
+                # insertion
+                distance[target_index][predicted_index - 1] + 1,
+
+                # match / substitution
+                distance[target_index - 1][predicted_index - 1]
+                + substitution_cost
+            )
+
+    # ---------------------------------------------------------
+    # Backtracking
+    # ---------------------------------------------------------
+
+    aligned_targets = []
+    aligned_predictions = []
+
+    substitutions = 0
+    insertions = 0
+    deletions = 0
+    correct = 0
+
+    target_index = num_target
+    predicted_index = num_predicted
+
+    while target_index > 0 or predicted_index > 0:
+
+        # Match or substitution
+        if target_index > 0 and predicted_index > 0:
+
+            target_phoneme = target[target_index - 1]
+            predicted_phoneme = predicted[predicted_index - 1]
+
+            substitution_cost = (
+                0
+                if target_phoneme == predicted_phoneme
+                else 1
+            )
+
+            if (
+                distance[target_index][predicted_index]
+                ==
+                distance[target_index - 1][predicted_index - 1]
+                + substitution_cost
+            ):
+
+                aligned_targets.append(target_phoneme)
+                aligned_predictions.append(predicted_phoneme)
+
+                if substitution_cost == 0:
+                    correct += 1
+                else:
+                    substitutions += 1
+
+                target_index -= 1
+                predicted_index -= 1
+
+                continue
+
+        # Deletion
+        if (
+            target_index > 0
+            and
+            distance[target_index][predicted_index]
+            ==
+            distance[target_index - 1][predicted_index] + 1
+        ):
+
+            aligned_targets.append(
+                target[target_index - 1]
+            )
+
+            aligned_predictions.append("-")
+
+            deletions += 1
+            target_index -= 1
+
+            continue
+
+        # Insertion
+        aligned_targets.append("-")
+
+        aligned_predictions.append(
+            predicted[predicted_index - 1]
+        )
+
+        insertions += 1
+        predicted_index -= 1
+
+    aligned_targets.reverse()
+    aligned_predictions.reverse()
+
+    operation_counts = {
+        "correct": correct,
+        "substitutions": substitutions,
+        "insertions": insertions,
+        "deletions": deletions,
+        "edit_distance": (
+            substitutions
+            + insertions
+            + deletions
+        )
+    }
+
+    return (
+        aligned_predictions,
+        aligned_targets,
+        operation_counts
+    )
+
 def edit_distance(seq1, seq2, device=None):
     """
     Compute Levenshtein edit distance between two sequences using a PyTorch tensor
@@ -448,6 +833,29 @@ def edit_distance(seq1, seq2, device=None):
                 ]))
 
     return int(dp[m, n].item())
+
+def sweep(current_scale, remaining_depth, upper_bound=16):
+    """Generates a large number of possible step_scale configurations and sweeping over them"""
+    if remaining_depth == 0:
+        return [[]]
+
+    results = []
+
+    for i in range(1, upper_bound+1):
+
+        if current_scale*i > upper_bound+1:
+            break
+
+        results += [
+            [current_scale*i, *ans]
+            for ans in sweep(
+                current_scale*i,
+                remaining_depth - 1,
+                upper_bound=upper_bound
+            )
+        ]
+
+    return results
 
 
 def compute_batch_per_from_log_probs__inefficient(log_probs,
@@ -541,7 +949,7 @@ def decode_batch_to_phonemes(log_probs, input_lengths, targets, target_lengths, 
 
 def compute_batch_per_from_log_probs(
     log_probs,
-    input_lengths,
+    output_lengths, # contains the lengths of the unpadded temporal lengths of each sample produced as output by the model
     targets,
     target_lengths,
     blank_idx=0
@@ -562,43 +970,54 @@ def compute_batch_per_from_log_probs(
 
     # Transfer everything to CPU once.
     pred_ids_batch = pred_ids_batch.cpu()
-    input_lengths = input_lengths.cpu().tolist()
+    output_lengths = output_lengths.cpu().tolist()
     targets = targets.detach().cpu().tolist()
     target_lengths = target_lengths.cpu().tolist()
 
-    total_edit_distance = 0
-    total_target_length = 0
-    target_offset = 0
+    total_edit_distance = 0 # the edit distance of the whole batch
+    total_target_length = 0 # the target lengths of the whole batch
+    target_offset = 0 # target offset to be able to follow where the target of the next sample begins during iteration
 
-    for b, (current_input_length, current_target_length) in enumerate(
-        zip(input_lengths, target_lengths)
+    for sample, (current_input_length, current_target_length) in enumerate(
+        zip(output_lengths, target_lengths)
     ):
         # Prediction is already on CPU.
         pred_ids = pred_ids_batch[
-            b, :current_input_length
+            sample, :current_input_length
         ].tolist()
 
+        # collapse repeated phonemes and delete blanks from the prediction sequence
         decoded_pred = ctc_greedy_decode(
             pred_ids,
             blank_idx=blank_idx
         )
 
-        # targets is already a Python list.
+        # define the target sequence of the current sample in the batch
         target_seq = targets[
             target_offset:
             target_offset + current_target_length
         ]
 
+        # update the target offset for the next sample
         target_offset += current_target_length
 
-        dist = edit_distance(
+        # calculate the edit distance of the current sample (edit distance -> (S+D+I))
+        # dist = edit_distance( # own implementation
+        #    decoded_pred,
+        #    target_seq
+        #)
+
+        # use the optimized editdistance.eval() implementation for the Levenshtein distance
+        dist = editdistance.eval(
             decoded_pred,
             target_seq
         )
 
+        # update the edit distance and target lengths values for the batch PER calculation
         total_edit_distance += dist
         total_target_length += current_target_length
 
+    # calculate the Batch per based on the sum of the edit distances and the sum of the target lengths
     batch_per = (
         total_edit_distance / total_target_length
         if total_target_length > 0
