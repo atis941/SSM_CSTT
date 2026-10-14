@@ -168,8 +168,7 @@ class TIMITDataset(Dataset):
                 print("Pad the time domain tensors...")
                 self.pad_all_time_domain_tensors()
 
-                print(
-                    "Stack the padded waveforms and save their original lengths...")
+                print("Stack the padded waveforms and save their original lengths...")
                 self.stack_waveforms_and_list_original_waveform_lengths()
 
                 print("Calculate the mean and std values...")
@@ -181,8 +180,7 @@ class TIMITDataset(Dataset):
                 print("Normalize the stacked waveform tensor...")
                 self.normalize_waveforms()
 
-                print(
-                    f"Save the processed data into {train_or_test}_{phone_set}_cache_statistics.pt file...")
+                print(f"Save the processed data into {train_or_test}_{phone_set}_cache_statistics.pt file...")
                 self.save_cache()
 
             print(f"{train_or_test} dataset created ")
@@ -255,6 +253,10 @@ class TIMITDataset(Dataset):
             "std": self.std,
             "phone_set": self.phone_set,
             "phoneme_to_idx_vocab": self.phoneme_to_idx_vocab,
+            "sample_ids": [
+                sample["base_name"]
+                for sample in self.samples
+            ],
         }
 
         torch.save(cache, self.cache_file)
@@ -447,6 +449,7 @@ class TIMITDataset(Dataset):
         self.padded_waveforms = []
         num_of_waveforms = len(self.waveforms)
 
+
         for idx, waveform in enumerate(self.waveforms):
 
             current_length = waveform.shape[1]
@@ -548,6 +551,24 @@ class TIMITDataset(Dataset):
                 waveform.shape[1]
                 if waveform.shape[1] > self.max_waveform_length
                 else self.max_waveform_length
+            )
+
+        # --------------------------------------------------------------------
+        # Make padded temporal dimension compatible with RZOH during training
+        # --------------------------------------------------------------------
+        # RZOH uses downscale factors up to 128.
+        # Therefore pad the dataset to a temporal length
+        # divisible by 128.
+        rzoh_max_downscale = 128
+
+        remainder = (
+            self.max_waveform_length
+            % rzoh_max_downscale
+        )
+
+        if remainder != 0:
+            self.max_waveform_length += (
+                rzoh_max_downscale - remainder
             )
 
     def check_dataset_for_pure_set_type(self) -> None:

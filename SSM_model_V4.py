@@ -83,7 +83,7 @@ class SSMPhonemeModel(nn.Module):
         if rzoh_probabilities is None:
             rzoh_probabilities = [0.0] * num_of_ssm_layers
 
-        assert len(rzoh_probabilities) == num_of_ssm_layers, ("rzoh_probabilities dimension must match num_of_ssm_layers")
+        assert len(rzoh_probabilities) == num_of_ssm_layers, ("rzoh_probabilities dimension must match num_of_ssm_layers. If you dont want to use ")
 
         self.rzoh_layers = nn.ModuleList([
             RandomZeroOrderHold(prob=prob) if prob > 0.0 else nn.Identity() for prob in rzoh_probabilities # use Identity for security of 0.0 prob division in RZOH
