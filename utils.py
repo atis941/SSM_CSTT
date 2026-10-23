@@ -114,7 +114,8 @@ def collate_fn_ctc(batch: list) -> tuple:
 
 def collate_fn_ctc_time_domain_padding(batch: list,
                                        mel_transform: torchaudio.transforms.MelSpectrogram,
-                                       hop_length: int) -> tuple:
+                                       hop_length: int,
+                                       apply_rzoh: bool) -> tuple:
     """
     Collate function for variable-length TIMIT samples.
     Also calculates the mel spectrogram for the padded time audio samples
@@ -135,6 +136,8 @@ def collate_fn_ctc_time_domain_padding(batch: list,
     hop_length: int
         the hop length of the mel spectrogram. Necesary to be a parameter to calculate the length of the valid scpectrogram features
 
+    apply_rzoh: bool
+        whether to apply RZOH padding to the mel spectrogram features or not
     Returns
     -------
     tuple: 
@@ -187,6 +190,30 @@ def collate_fn_ctc_time_domain_padding(batch: list,
     # Safety: CTC input lengths must not be larger than actual T_max
     orig_feature_lengths = torch.clamp(
         orig_feature_lengths, max=mel_specs.shape[1])
+
+    # -----------------------------------------------------------
+    # Pad Mel spectrogram temporal dimension for RZOH compatibility
+    # -----------------------------------------------------------
+    if apply_rzoh:
+        rzoh_max_downscale = 128
+
+        # Current number of Mel frames in the batch
+        current_mel_length = mel_specs.shape[1]
+
+        # Calculate the additional frames needed to reach
+        # the next multiple of 128
+        padding_amount = (
+            -current_mel_length
+        ) % rzoh_max_downscale
+
+        # mel_specs shape: [B, T, n_mels]
+        # Pad only the temporal dimension (T), not the Mel features
+        mel_specs = torch.nn.functional.pad(
+            mel_specs,
+            pad=(0, 0, 0, padding_amount),
+            mode="constant",
+            value=0.0
+        )
 
     # Label lengths: [B]
     label_lengths = torch.tensor(
