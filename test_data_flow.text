@@ -1,0 +1,147 @@
+                         VALIDATION DATALOADER
+                                  │
+                                  ▼
+                ┌────────────────────────────────┐
+                │ X_val                          │
+                │   Input recordings             │
+                │   Shape: [3, 500, F]           │
+                │                                │
+                │ X_val_length                   │
+                │   [500, 420, 350]              │
+                │                                │
+                │ y_val                          │
+                │   [12,5,8,17,3,7,11,...]       │
+                │   Shape: [12]                  │
+                │                                │
+                │ y_val_length                   │
+                │   [4, 3, 5]                    │
+                └───────────────┬────────────────┘
+                                │
+                                ▼
+                       evaluate_one_batch()
+                                │
+                                ▼
+                ┌────────────────────────────────┐
+                │ log_probs                      │
+                │   Shape: [3, 250, 62]          │
+                │   Type: torch.Tensor           │
+                │   Content: Log probabilities   │
+                │                                │
+                │ valid_output_lengths           │
+                │   [250, 210, 175]              │
+                │   Type: torch.Tensor           │
+                │                                │
+                │ y_val                          │
+                │   Ground-truth phoneme indices │
+                │                                │
+                │ y_val_length                   │
+                │   [4, 3, 5]                    │
+                └───────────────┬────────────────┘
+                                │
+                                ▼
+                      calculate_PER_for_batch()
+                                │
+                                ▼
+                 compute_batch_per_from_log_probs()
+                                │
+                  ┌─────────────┴──────────────┐
+                  │                            │
+                  ▼                            ▼
+             CTC DECODER                 TARGET PROCESSING
+                  │                            │
+                  ▼                            ▼
+         log_probs [B,T,C]              y_val → Python list
+         output_lengths [B]             y_val_length → list
+                  │                            │
+                  ▼                            │
+         Greedy / Beam search                  │
+                  │                            │
+                  ▼                            │
+         predictions                           │
+         [                               target_seq
+           [12,5,8,17],                        │
+           [3,7,10],                           │
+           [4,9,21,6]                          │
+         ]                                     │
+                  │                            │
+                  └─────────────┬──────────────┘
+                                │
+                                ▼
+                         editdistance.eval()
+                                │
+                                ▼
+                       total_edit_distance
+                       total_target_length
+                                │
+                                ▼
+                             BATCH PER
+                                │
+                                ▼
+                     Accumulate epoch totals
+                                │
+                                ▼
+                            DATASET PER
+
+test_loop:
+# X_val:
+#   torch.Tensor [B, T_input, ...]
+#   Input recordings padded to the longest recording in the batch.
+#
+# X_val_length:
+#   torch.Tensor [B]
+#   Number of valid input time steps for each recording, excluding padding.
+#
+# y_val:
+#   torch.Tensor [sum(y_val_length)]
+#   Ground-truth phoneme indices of all recordings concatenated into one tensor.
+#   Phoneme indices refer to the original vocabulary (CTC blank = 0).
+#
+# y_val_length:
+#   torch.Tensor [B]
+#   Number of ground-truth phonemes for each recording.
+
+evaluate_one_batch()
+# log_probs:
+#   torch.Tensor [B, T_output, C]
+#   Log-softmax probabilities predicted by the SSM.
+#   Each time step contains C class scores (61 phonemes + CTC blank).
+#
+# valid_output_lengths:
+#   torch.Tensor [B]
+#   Number of valid SSM output time steps for each recording.
+#   Accounts for temporal subsampling and excludes padded positions.
+#
+# log_probs_ctc:
+#   torch.Tensor [T_output, B, C]
+#   Time-major version of log_probs, required by PyTorch CTCLoss.
+
+compute_batch_per_from_log_probs# predictions:
+#   list[list[int]], length B
+#   CTC-decoded phoneme sequences for all recordings in the batch.
+#   Each inner list contains phoneme indices from the original vocabulary.
+#   The sequences may have different lengths.
+#
+# targets:
+#   list[int]
+#   Ground-truth phoneme indices concatenated across all recordings.
+#
+# target_lengths:
+#   list[int], length B
+#   Number of ground-truth phonemes in each recording.
+#
+# target_offset:
+#   int
+#   Starting position of the current recording's target sequence
+#   inside the concatenated targets list.
+#
+# decoded_pred:
+#   list[int]
+#   Predicted phoneme sequence for the current recording.
+#
+# target_seq:
+#   list[int]
+#   Ground-truth phoneme sequence for the current recording.
+#
+# dist:
+#   int
+#   Levenshtein distance between prediction and target (S + D + I).

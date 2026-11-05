@@ -148,8 +148,9 @@ class SSMPhonemeModel(nn.Module):
                 previous_step_scale
             )
 
+
     def get_output_lengths(self, input_lengths):
-        """Returns the output length, of the subsampled output, when it downsampling happens with step_scale during inference"""
+        """Returns the output length, of the subsampled output, when downsampling happens with step_scale during inference"""
 
         output_lengths = input_lengths.clone()
 
@@ -238,3 +239,58 @@ class SSMPhonemeModel(nn.Module):
             handle.remove()
 
         self.feature_hook_handles.clear()
+
+    def get_number_of_MACs(self) -> float:
+        """
+        Estimate the number of MACs per original input time step.
+
+        The calculation includes:
+            - All SSM SequenceLayers
+            - The final linear classifier
+
+        The current step-scale configuration is considered.
+
+        Returns
+        -------
+        float
+            Estimated MACs per original input time step.
+        """
+
+        n_MACs = 0.0
+
+        # SSM layers
+        for layer in self.ssm_layers:
+            n_MACs += layer.get_number_of_MACs()
+
+        # Final linear classifier
+        n_MACs += (
+            self.classifier.in_features
+            * self.classifier.out_features
+            / self.ssm_layers[-1].s5.step_scale
+        )
+
+        return n_MACs
+
+    def get_MACs_percent(self,
+                         default_macs: float,
+                         macs: float) -> float:
+        """Calculates the computational cost relative to the baseline computational cost (where there is no subsampling)"""
+        macs_percent = (
+            macs / default_macs
+        ) * 100
+
+        return macs_percent
+
+
+    def get_number_of_parameters(self) -> int:
+        """Return the total number of model parameters."""
+        return sum(p.numel() for p in self.parameters())
+
+
+    def get_number_of_trainable_parameters(self) -> int:
+        """Return the number of trainable model parameters."""
+        return sum(
+            p.numel()
+            for p in self.parameters()
+            if p.requires_grad
+        )

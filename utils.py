@@ -11,6 +11,11 @@ from typing import Any, Dict, Iterable, Optional, Union, List
 import torchaudio
 import numpy as np
 import editdistance
+import math
+from pathlib import Path
+from collections import Counter
+from Decoder import CTCDecoder
+
 
 ####### function for creating the VOCABULARY from the present dataset #######
 
@@ -225,6 +230,40 @@ def collate_fn_ctc_time_domain_padding(batch: list,
     concatenated_labels = torch.cat(phoneme_label_list, dim=0)
 
     return mel_specs, orig_feature_lengths, concatenated_labels, label_lengths
+
+def check_timit_boundaries(dataset_path: str):
+
+    phn_files = list(Path(dataset_path).rglob("*.PHN"))
+
+    first_phonemes = Counter()
+    last_phonemes = Counter()
+
+    invalid_files = []
+
+    for phn_file in phn_files:
+
+        with open(phn_file, "r") as file:
+            lines = [line.strip() for line in file if line.strip()]
+
+        if not lines:
+            invalid_files.append(str(phn_file))
+            continue
+
+        first_phoneme = lines[0].split()[-1]
+        last_phoneme = lines[-1].split()[-1]
+
+        first_phonemes[first_phoneme] += 1
+        last_phonemes[last_phoneme] += 1
+
+        if first_phoneme != "h#" or last_phoneme != "h#":
+            invalid_files.append(str(phn_file))
+
+    print(f"Total recordings: {len(phn_files)}")
+    print(f"First phonemes: {first_phonemes}")
+    print(f"Last phonemes: {last_phonemes}")
+    print(f"Recordings without h# at both boundaries: {len(invalid_files)}")
+
+    return invalid_files
 
 def collate_fn_ctc_time_domain_features_during_training(batch: list) -> tuple:
     """
@@ -612,22 +651,6 @@ def save_training_result(
     return result_dir
 
 
-###### HELPER FUNCTIONS FOR CTC DECODING AND PER ######
-def ctc_greedy_decode(pred_ids, blank_idx=0):
-    """
-    Collapse repeats and remove blank symbols from a single predicted sequence.
-    pred_ids: list[int]
-    """
-    decoded = []
-    prev = None
-
-    for idx in pred_ids:
-        if idx != blank_idx and idx != prev:
-            decoded.append(idx)
-        prev = idx
-
-    return decoded
-
 
 def ctc_greedy_decode_ids( # for the inference and feature maps cell
     prediction_ids,
@@ -974,7 +997,184 @@ def decode_batch_to_phonemes(log_probs, input_lengths, targets, target_lengths, 
 
     return decoded_results
 
-def compute_batch_per_from_log_probs(
+
+
+
+def own_ctc_prefix_beam_search(
+    log_probs: torch.Tensor,
+    beam_width: int = 10,
+    blank_idx: int = 0
+) -> list[int]:
+    """
+    CTC prefix beam search decoding for one recording.
+
+    Parameters
+    ----------
+    log_probs : torch.Tensor
+        Log probabilities with shape [T, C].
+        T: Number of time steps.
+        C: Number of classes, including blank.
+
+    beam_width : int
+        Maximum number of candidate prefixes retained
+        after each time step.
+
+    blank_idx : int
+        Index of the CTC blank symbol.
+
+    Returns
+    -------
+    list[int]
+        Decoded phoneme indices.
+    """
+
+    if log_probs.ndim != 2:
+        raise ValueError("log_probs must have shape [T, C]")
+
+    if beam_width < 1:
+        raise ValueError("beam_width must be >= 1")
+
+    # Transfer to CPU for Python-based beam search
+    log_probs = log_probs.detach().cpu()
+
+    T, C = log_probs.shape
+
+    if not 0 <= blank_idx < C:
+        raise ValueError("blank_idx is outside the vocabulary")
+
+    def log_add(a, b):
+        """Numerically stable log(exp(a) + exp(b))."""
+        return math.logaddexp(a, b)
+
+    NEG_INF = -math.inf
+
+    # prefix -> (probability ending in blank,
+    #            probability ending in non-blank)
+    beams = {
+        (): (0.0, NEG_INF)
+    }
+
+    for t in range(T):
+
+        next_beams = {}
+
+        for prefix, (p_blank, p_nonblank) in beams.items():
+
+            p_total = log_add(p_blank, p_nonblank)
+
+            # Case 1: Extend alignment with blank.
+            # The decoded prefix remains unchanged.
+            p = float(log_probs[t, blank_idx])
+
+            nb_blank, nb_nonblank = next_beams.get(
+                prefix,
+                (NEG_INF, NEG_INF)
+            )
+
+            nb_blank = log_add(
+                nb_blank,
+                p_total + p
+            )
+
+            next_beams[prefix] = (
+                nb_blank,
+                nb_nonblank
+            )
+
+            # Case 2: Extend alignment with a phoneme
+            for c in range(C):
+
+                if c == blank_idx:
+                    continue
+
+                p = float(log_probs[t, c])
+
+                last = prefix[-1] if prefix else None
+
+                if c == last:
+
+                    # Repeating the last phoneme without
+                    # an intervening blank does not change
+                    # the decoded prefix.
+                    nb_blank, nb_nonblank = next_beams.get(
+                        prefix,
+                        (NEG_INF, NEG_INF)
+                    )
+
+                    nb_nonblank = log_add(
+                        nb_nonblank,
+                        p_nonblank + p
+                    )
+
+                    next_beams[prefix] = (
+                        nb_blank,
+                        nb_nonblank
+                    )
+
+                    # Repeating the last phoneme after
+                    # a blank creates a new phoneme.
+                    new_prefix = prefix + (c,)
+
+                    nb_blank, nb_nonblank = next_beams.get(
+                        new_prefix,
+                        (NEG_INF, NEG_INF)
+                    )
+
+                    nb_nonblank = log_add(
+                        nb_nonblank,
+                        p_blank + p
+                    )
+
+                    next_beams[new_prefix] = (
+                        nb_blank,
+                        nb_nonblank
+                    )
+
+                else:
+
+                    # Different phoneme:
+                    # extend the decoded prefix.
+                    new_prefix = prefix + (c,)
+
+                    nb_blank, nb_nonblank = next_beams.get(
+                        new_prefix,
+                        (NEG_INF, NEG_INF)
+                    )
+
+                    nb_nonblank = log_add(
+                        nb_nonblank,
+                        p_total + p
+                    )
+
+                    next_beams[new_prefix] = (
+                        nb_blank,
+                        nb_nonblank
+                    )
+
+        # Keep only the beam_width most probable prefixes
+        beams = dict(
+            sorted(
+                next_beams.items(),
+                key=lambda item: log_add(
+                    item[1][0],
+                    item[1][1]
+                ),
+                reverse=True
+            )[:beam_width]
+        )
+
+    # Select the most probable decoded sequence
+    best_prefix = max(
+        beams.items(),
+        key=lambda item: log_add(
+            item[1][0],
+            item[1][1]
+        )
+    )[0]
+
+    return list(best_prefix)
+
+def compute_batch_per_from_log_probs_old(
     log_probs,
     output_lengths, # contains the lengths of the unpadded temporal lengths of each sample produced as output by the model
     targets,
@@ -1005,12 +1205,12 @@ def compute_batch_per_from_log_probs(
     total_target_length = 0 # the target lengths of the whole batch
     target_offset = 0 # target offset to be able to follow where the target of the next sample begins during iteration
 
-    for sample, (current_input_length, current_target_length) in enumerate(
+    for sample, (valid_sample_length, target_sample_phoneme_length) in enumerate(
         zip(output_lengths, target_lengths)
     ):
         # Prediction is already on CPU.
         pred_ids = pred_ids_batch[
-            sample, :current_input_length
+            sample, :valid_sample_length
         ].tolist()
 
         # collapse repeated phonemes and delete blanks from the prediction sequence
@@ -1022,11 +1222,11 @@ def compute_batch_per_from_log_probs(
         # define the target sequence of the current sample in the batch
         target_seq = targets[
             target_offset:
-            target_offset + current_target_length
+            target_offset + target_sample_phoneme_length
         ]
 
         # update the target offset for the next sample
-        target_offset += current_target_length
+        target_offset += target_sample_phoneme_length
 
         # calculate the edit distance of the current sample (edit distance -> (S+D+I))
         # dist = edit_distance( # own implementation
@@ -1042,9 +1242,72 @@ def compute_batch_per_from_log_probs(
 
         # update the edit distance and target lengths values for the batch PER calculation
         total_edit_distance += dist
-        total_target_length += current_target_length
+        total_target_length += target_sample_phoneme_length
 
     # calculate the Batch per based on the sum of the edit distances and the sum of the target lengths
+    batch_per = (
+        total_edit_distance / total_target_length
+        if total_target_length > 0
+        else 0.0
+    )
+
+    return (
+        float(batch_per),
+        int(total_edit_distance),
+        int(total_target_length)
+    )
+
+def compute_batch_per_from_log_probs(log_probs,
+                                     output_lengths,
+                                     targets,
+                                     target_lengths,
+                                     decoder: CTCDecoder) -> list[float, int, int]:
+
+    # Decode the entire batch using the selected method
+    # log_probs: torch.Tensor - floating point, [B, T_subsampled, vocabulary_size], predicted log probability of every phoneme class at every output time step for every recording in the batch
+    # output_lengths: torch.tensor - integer, [B], the unpadded valid timesteps of each recordings AFTER THE SUBSAMPLING (if it was applied)
+    # predictions: list[list[int]] -> each element in the first list represent a recording in the batch
+    #                              -> each element in the second list represent a predicted phoneme index after the ctc decoding
+    predictions = decoder(
+        logits=log_probs,
+        valid_output_lengths=output_lengths
+    )
+
+    # Transfer target information to CPU and turn them into lists
+    targets = targets.detach().cpu().tolist() # e.g.: [12, 5, 8, 17, 3, 7, 11, 4, 9, 15, 21, 6] each element is a phoneme index
+    target_lengths = target_lengths.cpu().tolist() # e.g.: [4, 3, 5] each element is the length of a target sequence in the batch
+
+    total_edit_distance = 0
+    total_target_length = 0
+    target_offset = 0
+
+    for sample, current_target_length in enumerate(target_lengths):
+
+        # Retrieve decoded prediction for this recording
+        decoded_pred = predictions[sample] # e.g.: decoded_pred = [12, 5, 8, 17]
+
+        # Retrieve target phonemes for this recording
+        # e.g.: target_seq = [12, 5, 8, 17]
+        target_seq = targets[
+            target_offset:
+            target_offset + current_target_length
+        ]
+
+        target_offset += current_target_length
+
+        # Calculate edit distance
+        # it uses phoneme indices, not the phonemes themselves
+        # dist: int, e.g.: 4
+        dist = editdistance.eval(
+            decoded_pred,
+            target_seq
+        )
+
+        # accumulate the edit distance and the target length for calculating the
+        # PER across the whole dataset
+        total_edit_distance += dist
+        total_target_length += current_target_length
+
     batch_per = (
         total_edit_distance / total_target_length
         if total_target_length > 0
@@ -1061,3 +1324,45 @@ def compute_batch_per_from_log_probs(
 def log_message(msg, file_handle):
     print(msg)
     file_handle.write(msg + "\n")
+
+def sweep(current_scale: int,
+          remaining_depth: int,
+          max_scale: int) -> list[list[int]]:
+        """
+        Generate all valid cumulative step-scale configurations.
+
+        Parameters
+        ----------
+        current_scale : int
+            Cumulative step scale before the next SSM layer.
+
+        remaining_depth : int
+            Number of SSM layers for which step scales must be generated.
+
+        max_scale : int
+            Maximum allowed cumulative step scale.
+
+        Returns
+        -------
+        list[list[int]]
+            All valid step-scale configurations.
+        """
+
+        if remaining_depth == 0:
+            return [[]]
+
+        results = []
+
+        for factor in range(1, max_scale + 1):
+
+            next_scale = current_scale * factor
+
+            if next_scale > max_scale:
+                break
+
+            for remaining in sweep(current_scale=next_scale,
+                                   remaining_depth=remaining_depth - 1,
+                                   max_scale=max_scale):
+                results.append([next_scale, *remaining])
+
+        return results
