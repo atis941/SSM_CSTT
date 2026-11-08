@@ -972,31 +972,51 @@ def compute_batch_per_from_log_probs__inefficient(log_probs,
     return batch_per, total_edit_distance, total_target_length
 
 
-def decode_batch_to_phonemes(log_probs, input_lengths, targets, target_lengths, idx_to_phoneme, blank_idx=0):
+def decode_batch_to_phonemes(log_probs: torch.Tensor,
+                             input_lengths: torch.Tensor,
+                             targets: torch.Tensor,
+                             target_lengths: torch.Tensor,
+                             idx_to_phoneme: dict,
+                             decoder: CTCDecoder):
     """
-    Decode a batch and return list of (predicted_phonemes, target_phonemes)
+    Decode a batch and return a list of
+    (predicted_phonemes, target_phonemes).
     """
-    pred_ids = torch.argmax(log_probs, dim=-1)  # [B, T]
+
+    # Decode the entire batch using the CTCDecoder class
+    decoded_predictions = decoder(
+        logits=log_probs,
+        valid_output_lengths=input_lengths
+    )
 
     decoded_results = []
 
     offset = 0
-    for i in range(pred_ids.shape[0]):
-        # prediction
-        pred_seq = pred_ids[i, :input_lengths[i]].cpu().tolist()
-        decoded_pred = ctc_greedy_decode(pred_seq, blank_idx=blank_idx)
-        pred_phonemes = [idx_to_phoneme[p] for p in decoded_pred]
 
-        # target
+    for i, decoded_pred in enumerate(decoded_predictions):
+
+        # Convert predicted phoneme indices to phoneme symbols
+        pred_phonemes = [
+            idx_to_phoneme[p] for p in decoded_pred
+        ]
+
+        # Extract the target phonemes for the current recording
         tgt_len = target_lengths[i].item()
-        tgt_seq = targets[offset:offset + tgt_len].cpu().tolist()
-        offset += tgt_len
-        tgt_phonemes = [idx_to_phoneme[t] for t in tgt_seq]
 
-        decoded_results.append((pred_phonemes, tgt_phonemes))
+        tgt_seq = targets[offset:offset + tgt_len].cpu().tolist()
+
+        offset += tgt_len
+
+        # Convert target indices to phoneme symbols
+        tgt_phonemes = [
+            idx_to_phoneme[t] for t in tgt_seq
+        ]
+
+        decoded_results.append(
+            (pred_phonemes, tgt_phonemes)
+        )
 
     return decoded_results
-
 
 
 

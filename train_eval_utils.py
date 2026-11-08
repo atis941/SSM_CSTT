@@ -6,53 +6,211 @@ import torch
 from utils import compute_batch_per_from_log_probs, decode_batch_to_phonemes, log_message
 import pandas as pd
 import os
-
+from Upsampler import Upsampler
 from Decoder import CTCDecoder
 
-def train_one_batch(X_train, 
-                    X_train_length, 
-                    y_train, 
-                    y_train_length, 
-                    device, 
-                    ssm_model, 
-                    loss_fn, 
-                    true_train_batch_loss):
+def print_cuda_memory(stage: str, device: torch.device) -> None:
     """
-    Trains one batch and calculates loss
-    backward propagation excluded
+    Print CUDA memory usage at a specific execution point.
     """
-    # send tensors to device
+
+    device = torch.device(device)
+
+    if device.type != "cuda":
+        return
+
+    torch.cuda.synchronize(device)
+
+    mib = 1024 ** 2
+
+    allocated = torch.cuda.memory_allocated(device) / mib
+    reserved = torch.cuda.memory_reserved(device) / mib
+    peak = torch.cuda.max_memory_allocated(device) / mib
+
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+
+    free = free_bytes / mib
+    total = total_bytes / mib
+
+    print(
+        f"[CUDA] {stage:<30} | "
+        f"Allocated: {allocated:9.1f} MiB | "
+        f"Reserved: {reserved:9.1f} MiB | "
+        f"Peak: {peak:9.1f} MiB | "
+        f"Free: {free:9.1f} MiB | "
+        f"Total: {total:9.1f} MiB",
+        flush=True
+    )
+
+def train_one_batch(
+    X_train,
+    X_train_length,
+    y_train,
+    y_train_length,
+    device,
+    ssm_model,
+    loss_fn,
+    true_train_batch_loss,
+    debug_memory: bool = False
+):
+    """
+    Trains one batch and calculates loss.
+    Backward propagation excluded.
+
+    Optional CUDA memory debugging.
+    """
+
+    device = torch.device(device)
+
+    def debug(stage):
+        if debug_memory:
+            print_cuda_memory(stage, device)
+
+    if debug_memory and device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+        print("\n========== BATCH INFORMATION ==========")
+        print("Input shape:", tuple(X_train.shape))
+        print("Input dtype:", X_train.dtype)
+        print("Input device:", X_train.device)
+
+        print(
+            "Input tensor size:",
+            f"{X_train.numel() * X_train.element_size() / 1024**2:.2f} MiB"
+        )
+
+        print("Valid lengths:", X_train_length.tolist())
+
+        debug("0. Before CUDA transfer")
+
+    # ========================================================
+    # 1. TRANSFER DATA TO GPU
+    # ========================================================
+
     X_train = X_train.to(device)
     y_train = y_train.to(device)
 
-    # forward pass
-    logits = ssm_model(X_train)                    # [B, T, C]
-    log_probs = logits.log_softmax(dim=-1)        # [B, T, C]
+    debug("1. After CUDA transfer")
 
-    #print("logits finite:", torch.isfinite(logits).all().item())
-    #print("NaNs in logits:", torch.isnan(logits).sum().item())
-    #print("+Inf in logits:", torch.isposinf(logits).sum().item())
-    #print("-Inf in logits:", torch.isneginf(logits).sum().item())
+    # ========================================================
+    # 2. SSM FORWARD PASS
+    # ========================================================
 
-    #print("log_probs finite:", torch.isfinite(log_probs).all().item())
-    #print("NaNs in log_probs:", torch.isnan(log_probs).sum().item())
-    #print("+Inf in log_probs:", torch.isposinf(log_probs).sum().item())
-    #print("-Inf in log_probs:", torch.isneginf(log_probs).sum().item())
-    log_probs_ctc = log_probs.transpose(0, 1)     # [T, B, C]
+    logits = ssm_model(X_train)
 
-    #checking exploding gradients for the log probabilities
+    debug("2. After SSM forward")
+
+    if debug_memory:
+        print("Logits shape:", tuple(logits.shape))
+        print(
+            "Logits tensor size:",
+            f"{logits.numel() * logits.element_size() / 1024**2:.2f} MiB"
+        )
+
+    # ========================================================
+    # 3. LOG SOFTMAX
+    # ========================================================
+
+    log_probs = logits.log_softmax(dim=-1)
+
+    debug("3. After log_softmax")
+
+    # ========================================================
+    # 4. TRANSPOSE FOR CTC
+    # ========================================================
+
+    log_probs_ctc = log_probs.transpose(0, 1)
+
+    debug("4. After transpose")
+
+    # ========================================================
+    # 5. CHECK FINITE VALUES
+    # ========================================================
+
     check_finite_tensor(log_probs, "log_probs")
 
-    # loss
-    loss = loss_fn(log_probs_ctc, y_train, X_train_length, y_train_length)
+    debug("5. After finite check")
 
-    # checking exploding gradients for the loss
+    # ========================================================
+    # 6. CTC LOSS
+    # ========================================================
+
+    loss = loss_fn(
+        log_probs_ctc,
+        y_train,
+        X_train_length,
+        y_train_length
+    )
+
+    debug("6. After CTC loss")
+
+    # ========================================================
+    # 7. CHECK LOSS
+    # ========================================================
+
     check_finite_tensor(loss, "loss")
 
-    # accumulate weighted epoch loss
+    debug("7. After loss check")
+
+    # ========================================================
+    # 8. ACCUMULATE LOSS
+    # ========================================================
+
     true_train_batch_loss += loss.item() * len(X_train)
 
-    return log_probs, log_probs_ctc, true_train_batch_loss, loss
+    debug("8. Before return")
+
+    return (
+        log_probs,
+        log_probs_ctc,
+        true_train_batch_loss,
+        loss
+    )
+
+# def train_one_batch(X_train, 
+#                     X_train_length, 
+#                     y_train, 
+#                     y_train_length, 
+#                     device, 
+#                     ssm_model, 
+#                     loss_fn, 
+#                     true_train_batch_loss):
+#     """
+#     Trains one batch and calculates loss
+#     backward propagation excluded
+#     """
+#     # send tensors to device
+#     X_train = X_train.to(device)
+#     y_train = y_train.to(device)
+
+#     # forward pass
+#     logits = ssm_model(X_train)                    # [B, T, C]
+#     log_probs = logits.log_softmax(dim=-1)        # [B, T, C]
+
+#     #print("logits finite:", torch.isfinite(logits).all().item())
+#     #print("NaNs in logits:", torch.isnan(logits).sum().item())
+#     #print("+Inf in logits:", torch.isposinf(logits).sum().item())
+#     #print("-Inf in logits:", torch.isneginf(logits).sum().item())
+
+#     #print("log_probs finite:", torch.isfinite(log_probs).all().item())
+#     #print("NaNs in log_probs:", torch.isnan(log_probs).sum().item())
+#     #print("+Inf in log_probs:", torch.isposinf(log_probs).sum().item())
+#     #print("-Inf in log_probs:", torch.isneginf(log_probs).sum().item())
+#     log_probs_ctc = log_probs.transpose(0, 1)     # [T, B, C]
+
+#     #checking exploding gradients for the log probabilities
+#     check_finite_tensor(log_probs, "log_probs")
+
+#     # loss
+#     loss = loss_fn(log_probs_ctc, y_train, X_train_length, y_train_length)
+
+#     # checking exploding gradients for the loss
+#     check_finite_tensor(loss, "loss")
+
+#     # accumulate weighted epoch loss
+#     true_train_batch_loss += loss.item() * len(X_train)
+
+#     return log_probs, log_probs_ctc, true_train_batch_loss, loss
 
 def evaluate_one_batch(X_val: any,
                        X_val_length: any,
@@ -62,7 +220,9 @@ def evaluate_one_batch(X_val: any,
                        ssm_model: any,
                        loss_fn: any,
                        true_val_batch_loss: any,
-                       test_subsampling: bool = False):
+                       test_subsampling: bool = False,
+                       upsampler:Upsampler = None,
+                       upsampling_factor: int = 1):
     """Evaluates one batch during training"""
 
     # send tensors to device
@@ -70,16 +230,22 @@ def evaluate_one_batch(X_val: any,
     y_val = y_val.to(device)
 
     # forward pass
-    logits = ssm_model(X_val)                  # [B, T, C] -> raw model scores, NOT PROBABILITIES
-    log_probs = logits.log_softmax(dim=-1)    # [B, T, C]  ->  turn the raw model scores into probabilities
-    log_probs_ctc = log_probs.transpose(0, 1) # [T, B, C] -> ctc loss function needs to have the input in this shape
+    logits = ssm_model(X_val)
+    log_probs = logits.log_softmax(dim=-1)
 
-    # in case of subsampling the temporal dimension of the log_probs change by the step_scale factors
-    # for ctc we need to define the subsampled temporal length(if subsampling was applied)
     if test_subsampling:
         valid_output_lengths = ssm_model.get_output_lengths(X_val_length)
     else:
         valid_output_lengths = X_val_length
+
+    if upsampler is not None and upsampling_factor > 1:
+        log_probs, valid_output_lengths = upsampler(
+            log_probs=log_probs,
+            valid_output_lengths=valid_output_lengths,
+            factor=upsampling_factor
+        )
+
+    log_probs_ctc = log_probs.transpose(0, 1)
 
     # loss
     loss = loss_fn(log_probs_ctc, y_val, valid_output_lengths, y_val_length)
@@ -297,7 +463,8 @@ def qualitative_predictions(epoch: int,
                             val_dataloader: any,
                             device: any,
                             idx_to_phoneme_vocab: any,
-                            blank_idx: any):
+                            blank_idx: any,
+                            decoder: CTCDecoder):
     if (epoch + 1) % predict_every_epoch == 0:
         log_message(f"########## QUALITATIVE VALIDATION CHECK AFTER EPOCH {epoch + 1} ##########", log_file_predictions)
 
@@ -318,7 +485,8 @@ def qualitative_predictions(epoch: int,
                 targets=y_obs,
                 target_lengths=y_obs_length,
                 idx_to_phoneme=idx_to_phoneme_vocab,
-                blank_idx=blank_idx
+                blank_idx=blank_idx,
+                decoder=decoder,
             )
 
             # show only a few examples
@@ -421,7 +589,8 @@ def check_finite_tensor(tensor, name: str):
 
 def save_test_results_to_csv(
     test_results: list[dict[str, Any]],
-    test_save_path: str
+    test_save_path: str,
+    upsampling_factor: int,
 ) -> None:
     """
     Saves the testing results of all evaluated step-scale configurations
@@ -454,7 +623,7 @@ def save_test_results_to_csv(
     # Define output file path
     csv_path = os.path.join(
         test_save_path,
-        f"test_results.csv",
+        f"test_results_upsampling_{upsampling_factor}.csv",
     )
 
     # Save results
@@ -486,7 +655,10 @@ def append_test_results(test_results: list,
                         dataset_per: any,
                         total_edit_distance: any,
                         total_target_length: any,
-                        invalid_ctc_samples: any,
+                        upsampling_method: str,
+                        upsampling_factor: int,
+                        invalid_ctc_samples_before_upsampling: any,
+                        invalid_ctc_samples_after_upsampling: any,
                         macs: float,
                         macs_percent: float,
                         params: any,
@@ -500,7 +672,10 @@ def append_test_results(test_results: list,
         "test_PER": dataset_per,
         "total_edit_distance": total_edit_distance,
         "total_target_length": total_target_length,
-        "invalid_ctc_samples": invalid_ctc_samples,
+        "upsampling_method": upsampling_method,
+        "upsampling_factor": upsampling_factor,
+        "invalid_ctc_samples_before_subsampling": invalid_ctc_samples_before_upsampling,
+        "invalid_ctc_samples_after_subsampling": invalid_ctc_samples_after_upsampling,
         "macs": macs,
         "macs_percent": macs_percent,
         "params": params,
@@ -517,7 +692,7 @@ def append_test_results(test_results: list,
 def count_invalid_ctc_samples(
     targets: torch.Tensor,
     target_lengths: torch.Tensor,
-    output_lengths: torch.Tensor
+    output_lengths: torch.Tensor,
 ) -> int:
 
     invalid_samples = 0
