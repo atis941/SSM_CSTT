@@ -51,7 +51,8 @@ def train_one_batch(
     ssm_model,
     loss_fn,
     true_train_batch_loss,
-    debug_memory: bool = False
+    debug_memory: bool = False,
+    augmentation: any = None,
 ):
     """
     Trains one batch and calculates loss.
@@ -95,6 +96,22 @@ def train_one_batch(
     # ========================================================
     # 2. SSM FORWARD PASS
     # ========================================================
+
+    if augmentation is not None:
+        X_train = augmentation(X_train)
+
+        # Restore padding after augmentation
+        time_indices = torch.arange(
+            X_train.shape[1],
+            device=X_train.device
+        )
+
+        valid_mask = (
+            time_indices.unsqueeze(0)
+            < X_train_length.to(X_train.device).unsqueeze(1)
+        )
+
+        X_train = X_train * valid_mask.unsqueeze(-1)
 
     logits = ssm_model(X_train)
 
@@ -456,6 +473,8 @@ def log_training_time(training_start_time: any,
         log_file_predictions
     )
 
+    return elapsed_time_str
+
 def qualitative_predictions(epoch: int,
                             predict_every_epoch: int,
                             ssm_model:any,
@@ -485,7 +504,6 @@ def qualitative_predictions(epoch: int,
                 targets=y_obs,
                 target_lengths=y_obs_length,
                 idx_to_phoneme=idx_to_phoneme_vocab,
-                blank_idx=blank_idx,
                 decoder=decoder,
             )
 
@@ -541,27 +559,41 @@ def calculate_PER_for_batch(log_probs: any,
     return batch_per, total_edit_distance, total_target_length
 
 def log_batch_loss_and_PER(batch: int,
-                           compute_per: bool,
-                           epoch: int,
-                           epoch_per_calc_division: int,
-                           dataloader_obj: any,
-                           loss: any,
-                           batch_per: any,
-                           log_file_loss_and_PER: any,
-                           phase: str):
+                          compute_per: bool,
+                          epoch: int,
+                          epoch_per_calc_division: int,
+                          dataloader_obj: any,
+                          loss: any,
+                          batch_per: any,
+                          log_file_loss_and_PER: any,
+                          phase: str,
+                          learning_rates: tuple = None,
+                          cosanneal_warmup_steps: int = None):
+
+    # Common log message
+    print_str = (
+        f"{phase} batch: {batch + 1}/{len(dataloader_obj)} | "
+        f"Batch loss: {loss.item():.4f}"
+    )
+
+    if cosanneal_warmup_steps is not None:
+        scheduler_phase = "Warmup" if batch < cosanneal_warmup_steps else "Cosine"
+
+    # Append PER if calculated
     if compute_per and (epoch == 0 or (epoch + 1) % epoch_per_calc_division == 0):
-        log_message(
-            f"{phase} batch: {batch + 1}/{len(dataloader_obj)} | "
-            f"Batch loss: {loss.item():.4f} | "
-            f"Batch PER: {batch_per * 100:.2f}%",
-            log_file_loss_and_PER
+        if batch_per is not None:
+            print_str += f" | Batch PER: {batch_per * 100:.2f}%"
+
+    # Append learning rates if optimizer is provided
+    if learning_rates is not None:
+        print_str += (
+            f" | Phase: {scheduler_phase}"
+            f" | SSM LR: {learning_rates[0]:.8f}"
+            f" | Other LR: {learning_rates[1]:.8f}"
         )
-    else:
-        log_message(
-            f"{phase} batch: {batch + 1}/{len(dataloader_obj)} | "
-            f"Batch loss: {loss.item():.4f}",
-            log_file_loss_and_PER
-        )
+
+    # Print and write to log file
+    log_message(print_str, log_file_loss_and_PER)
 
 
 def check_gradients_for_inf(ssm_model: any):
