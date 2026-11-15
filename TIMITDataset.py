@@ -147,7 +147,7 @@ class TIMITDataset(Dataset):
         print("Creating cache directory")
         self.create_cache_directory()
 
-        # create the cache filenames for checking if they exist
+        # create the cache FILENAMES for checking if they exist
         self.cache_file = os.path.join(
             self.cache_dir, f"{train_or_test}_{phone_set}_cache_statistics.pt")
 
