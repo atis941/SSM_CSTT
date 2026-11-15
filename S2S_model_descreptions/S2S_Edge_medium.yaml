@@ -10,6 +10,11 @@ complex_output: false # Complex output (options: true, false)
 act: LeakyRELu # Activation function (options: RELu, LeakyRELu, Identity)
 norm: true # Normalization (options: true, false)
 norm_type: bn # Normalization type (options: ln, bn)
+step_scale_configurations:
+  no_subsampling: [1, 1, 1, 1]
+  low_subsampling: [1, 2, 4, 8]
+  medium_subsampling: [2, 4, 8, 16]
+  large_subsampling: [4, 8, 16, 32]
 
 ###############################################################################
 #                              Regularization

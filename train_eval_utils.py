@@ -124,6 +124,8 @@ def train_one_batch(
             f"{logits.numel() * logits.element_size() / 1024**2:.2f} MiB"
         )
 
+    X_train_length = ssm_model.get_output_lengths(input_lengths=X_train_length)
+
     # ========================================================
     # 3. LOG SOFTMAX
     # ========================================================
@@ -179,6 +181,7 @@ def train_one_batch(
 
     return (
         log_probs,
+        X_train_length,
         log_probs_ctc,
         true_train_batch_loss,
         loss
@@ -250,10 +253,7 @@ def evaluate_one_batch(X_val: any,
     logits = ssm_model(X_val)
     log_probs = logits.log_softmax(dim=-1)
 
-    if test_subsampling:
-        valid_output_lengths = ssm_model.get_output_lengths(X_val_length)
-    else:
-        valid_output_lengths = X_val_length
+    valid_output_lengths = ssm_model.get_output_lengths(input_lengths=X_val_length)
 
     if upsampler is not None and upsampling_factor > 1:
         log_probs, valid_output_lengths = upsampler(
@@ -498,9 +498,11 @@ def qualitative_predictions(epoch: int,
             logits_obs = ssm_model(X_obs)
             log_probs_obs = logits_obs.log_softmax(dim=-1)
 
+            valid_output_lengths = ssm_model.get_output_lengths(input_lengths=X_obs_length)
+
             decoded_examples = decode_batch_to_phonemes(
                 log_probs=log_probs_obs,
-                input_lengths=X_obs_length,
+                input_lengths=valid_output_lengths,
                 targets=y_obs,
                 target_lengths=y_obs_length,
                 idx_to_phoneme=idx_to_phoneme_vocab,
