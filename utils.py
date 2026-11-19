@@ -15,6 +15,7 @@ import math
 from pathlib import Path
 from collections import Counter
 from Decoder import CTCDecoder
+from train_eval_utils import map_phonemes_61_to_39
 
 
 ####### function for creating the VOCABULARY from the present dataset #######
@@ -1281,7 +1282,8 @@ def compute_batch_per_from_log_probs(log_probs,
                                      output_lengths,
                                      targets,
                                      target_lengths,
-                                     decoder: CTCDecoder) -> list[float, int, int]:
+                                     decoder: CTCDecoder,
+                                     use_vocab_conversion: bool) -> list[float, int, int]:
 
     # Decode the entire batch using the selected method
     # log_probs: torch.Tensor - floating point, [B, T_subsampled, vocabulary_size], predicted log probability of every phoneme class at every output time step for every recording in the batch
@@ -1314,6 +1316,20 @@ def compute_batch_per_from_log_probs(log_probs,
         ]
 
         target_offset += current_target_length
+
+        # ==========================================
+        # NEW: Convert both sequences to 39 phonemes
+        # ==========================================
+
+        decoded_pred_39 = map_phonemes_61_to_39(
+            phoneme_indices=decoded_pred,
+            phoneme_mapping=phoneme_mapping
+        )
+
+        target_seq_39 = map_phonemes_61_to_39(
+            phoneme_indices=target_seq,
+            phoneme_mapping=phoneme_mapping
+        )
 
         # Calculate edit distance
         # it uses phoneme indices, not the phonemes themselves

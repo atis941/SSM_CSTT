@@ -536,7 +536,9 @@ def calculate_PER_for_batch(log_probs: any,
                             y_length: any,
                             total_edit_distance: any,
                             total_target_length: any,
-                            decoder: CTCDecoder) -> list[float, int, int]:
+                            decoder: CTCDecoder,
+                            use_vocab_conversion: bool = False,
+                            phoneme_mapping: dict = None) -> list[float, int, int]:
     # calculates the PER value for one batch
     # log_probs: torch.Tensor - floating point, [B, T_subsampled, vocabulary_size], predicted log probability of every phoneme class at every output time step for every recording in the batch
     # X_lengths: torch.tensor - integer, [B], the unpadded valid timesteps of each recordings AFTER THE SUBSAMPLING (if it was applied)
@@ -548,7 +550,9 @@ def calculate_PER_for_batch(log_probs: any,
         output_lengths=X_length,
         targets=y,
         target_lengths=y_length,
-        decoder=decoder
+        decoder=decoder,
+        use_vocab_conversion=use_vocab_conversion,
+        phoneme_mapping=phoneme_mapping
     )
     # batch_per: float, the calculated PER value for the batch
     # batch_edits: int, the calculated edit distance for the batch
@@ -559,6 +563,26 @@ def calculate_PER_for_batch(log_probs: any,
     total_target_length += batch_targets
 
     return batch_per, total_edit_distance, total_target_length
+
+def map_phonemes_61_to_39(
+    phoneme_indices: list[int],
+    phoneme_mapping: dict
+) -> list[int]:
+
+    mapped_phonemes = []
+
+    for phoneme_index in phoneme_indices:
+
+        # JSON dictionary keys are strings.
+        mapped_index = phoneme_mapping[str(phoneme_index)][0]
+
+        # Skip phonemes excluded from the 39-phone vocabulary (q).
+        if mapped_index is None:
+            continue
+
+        mapped_phonemes.append(mapped_index)
+
+    return mapped_phonemes
 
 def log_batch_loss_and_PER(batch: int,
                           compute_per: bool,
