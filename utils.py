@@ -15,11 +15,27 @@ import math
 from pathlib import Path
 from collections import Counter
 from Decoder import CTCDecoder
-from train_eval_utils import map_phonemes_61_to_39
 
 
 ####### function for creating the VOCABULARY from the present dataset #######
 
+def map_phonemes_61_to_39(phoneme_indices: list[int],
+                          phoneme_mapping: dict) -> list[int]:
+
+    mapped_phonemes = []
+
+    for phoneme_index in phoneme_indices:
+
+        # JSON dictionary keys are strings.
+        mapped_index = phoneme_mapping[str(phoneme_index)][0]
+
+        # Skip phonemes excluded from the 39-phone vocabulary (q).
+        if mapped_index is None:
+            continue
+
+        mapped_phonemes.append(mapped_index)
+
+    return mapped_phonemes
 
 def build_phoneme_vocab(root_dir, save_dir=None):
     phoneme_set = set()
@@ -1278,12 +1294,48 @@ def compute_batch_per_from_log_probs_old(
         int(total_target_length)
     )
 
+import json
+
+
+def decode_phoneme_sequence(
+    sequence: list[int],
+    vocab_version: int
+) -> str:
+
+    # Define vocabulary paths
+    vocab_61_path = "/Users/atis/Desktop/MasterArbeit/Code/vocabulary/idx_to_phoneme_61.json"
+    vocab_39_path = "/Users/atis/Desktop/MasterArbeit/Code/vocabulary/idx_to_phoneme_39.json"
+
+    # Select vocabulary
+    if vocab_version == 61:
+        vocab_path = vocab_61_path
+
+    elif vocab_version == 39:
+        vocab_path = vocab_39_path
+
+    else:
+        raise ValueError("vocab_version must be either 61 or 39.")
+
+    # Load vocabulary
+    with open(vocab_path, "r", encoding="utf-8") as file:
+        vocabulary = json.load(file)
+
+    # Convert phoneme indices to phoneme strings
+    decoded_phonemes = [
+        vocabulary[str(index)]
+        for index in sequence
+    ]
+
+    # Join phonemes into a single string
+    return " ".join(decoded_phonemes)
+
 def compute_batch_per_from_log_probs(log_probs,
                                      output_lengths,
                                      targets,
                                      target_lengths,
                                      decoder: CTCDecoder,
-                                     use_vocab_conversion: bool) -> list[float, int, int]:
+                                     use_vocab_conversion: bool,
+                                     phoneme_mapping: dict) -> list[float, int, int]:
 
     # Decode the entire batch using the selected method
     # log_probs: torch.Tensor - floating point, [B, T_subsampled, vocabulary_size], predicted log probability of every phoneme class at every output time step for every recording in the batch
@@ -1318,18 +1370,30 @@ def compute_batch_per_from_log_probs(log_probs,
         target_offset += current_target_length
 
         # ==========================================
-        # NEW: Convert both sequences to 39 phonemes
+        # Convert both sequences to 39 phonemes
         # ==========================================
 
-        decoded_pred_39 = map_phonemes_61_to_39(
-            phoneme_indices=decoded_pred,
-            phoneme_mapping=phoneme_mapping
-        )
+        print("BEFORE DECODING:")
+        print(f"pred: {decoded_pred}")
+        print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=61)}")
+        print(f"target: {target_seq}")
+        print(f"{decode_phoneme_sequence(sequence=target_seq, vocab_version=61)}\n")
+        
 
-        target_seq_39 = map_phonemes_61_to_39(
-            phoneme_indices=target_seq,
-            phoneme_mapping=phoneme_mapping
-        )
+        if use_vocab_conversion:
+            decoded_pred = map_phonemes_61_to_39(phoneme_indices=decoded_pred,
+                                                 phoneme_mapping=phoneme_mapping)
+
+            target_seq = map_phonemes_61_to_39(phoneme_indices=target_seq,
+                                               phoneme_mapping=phoneme_mapping)
+
+        print("AFTER DECODING:")
+        print(f"decoded_pred: {decoded_pred}")
+        print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=39)}")
+        print(f"decoded_target: {target_seq}")
+        print(f"{decode_phoneme_sequence(sequence=target_seq, vocab_version=39)}")
+        print("---------------------------")
+        # input("Press Enter to continue...")
 
         # Calculate edit distance
         # it uses phoneme indices, not the phonemes themselves
@@ -1342,7 +1406,7 @@ def compute_batch_per_from_log_probs(log_probs,
         # accumulate the edit distance and the target length for calculating the
         # PER across the whole dataset
         total_edit_distance += dist
-        total_target_length += current_target_length
+        total_target_length += len(target_seq)
 
     batch_per = (
         total_edit_distance / total_target_length

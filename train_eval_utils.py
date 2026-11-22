@@ -564,26 +564,6 @@ def calculate_PER_for_batch(log_probs: any,
 
     return batch_per, total_edit_distance, total_target_length
 
-def map_phonemes_61_to_39(
-    phoneme_indices: list[int],
-    phoneme_mapping: dict
-) -> list[int]:
-
-    mapped_phonemes = []
-
-    for phoneme_index in phoneme_indices:
-
-        # JSON dictionary keys are strings.
-        mapped_index = phoneme_mapping[str(phoneme_index)][0]
-
-        # Skip phonemes excluded from the 39-phone vocabulary (q).
-        if mapped_index is None:
-            continue
-
-        mapped_phonemes.append(mapped_index)
-
-    return mapped_phonemes
-
 def log_batch_loss_and_PER(batch: int,
                           compute_per: bool,
                           epoch: int,
