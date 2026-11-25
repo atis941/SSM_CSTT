@@ -1391,6 +1391,11 @@ def compute_batch_per_from_log_probs(log_probs,
         # Convert both sequences to 39 phonemes
         # ==========================================
 
+        # print("BEFORE DECODING:")
+        # print(f"pred: {decoded_pred}")
+        # print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=61)}")
+        # print(f"target: {target_seq}")
+        # print(f"{decode_phoneme_sequence(sequence=target_seq, vocab_version=61)}\n")
         #print("BEFORE DECODING:")
         #print(f"pred: {decoded_pred}")
         #print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=61)}")
@@ -1405,6 +1410,12 @@ def compute_batch_per_from_log_probs(log_probs,
             target_seq = map_phonemes_61_to_39(phoneme_indices=target_seq,
                                                phoneme_mapping=phoneme_mapping)
 
+        # print("AFTER DECODING:")
+        # print(f"decoded_pred: {decoded_pred}")
+        # print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=39)}")
+        # print(f"decoded_target: {target_seq}")
+        # print(f"{decode_phoneme_sequence(sequence=target_seq, vocab_version=39)}")
+        # print("---------------------------")
         # print("AFTER DECODING:")
         # print(f"decoded_pred: {decoded_pred}")
         # print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=39)}")

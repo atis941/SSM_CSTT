@@ -29,7 +29,7 @@ class SSMPhonemeModel(nn.Module):
         act: str = "LeakyRELu",
         trainable_SkipLayer: bool = True,
         rzoh_probabilities: list[float] | None = None,
-        
+        ssm_classifier: bool = False
     ):
         super().__init__()
 
@@ -74,10 +74,26 @@ class SSMPhonemeModel(nn.Module):
             self.lin_dropout1 = nn.Dropout(linear_dropout)
 
         # create the last Linear classifier layer
-        self.classifier = nn.Linear(
-            in_features=d_out[-1],
-            out_features=vocab_size
-        )
+        if ssm_classifier:
+            self.classifier = SequenceLayer(d_in=d_out[-1],
+                                            d_state=d_state[-1],
+                                            d_out=vocab_size,
+                                            input_bias=input_bias,
+                                            output_bias=output_bias,
+                                            complex_output=complex_output,
+                                            B_C_init = B_C_init,
+                                            bias_init = bias_init,
+                                            stability = stability,
+                                            norm=norm,
+                                            norm_type=norm_type,
+                                            dropout=ssm_dropout,
+                                            act=act,
+                                            trainable_SkipLayer=trainable_SkipLayer)
+        else:
+            self.classifier = nn.Linear(
+                in_features=d_out[-1],
+                out_features=vocab_size
+            )
 
         # create the RZOH layers
         if rzoh_probabilities is None:
