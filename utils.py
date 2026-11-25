@@ -282,7 +282,8 @@ def check_timit_boundaries(dataset_path: str):
 
     return invalid_files
 
-def collate_fn_ctc_time_domain_features_during_training(batch: list) -> tuple:
+def collate_fn_ctc_time_domain_features_during_training(batch: list,
+                                                        apply_rzoh: bool = False) -> tuple:
     """
     Collate already padded time-domain TIMIT waveforms for CTC.
 
@@ -309,27 +310,44 @@ def collate_fn_ctc_time_domain_features_during_training(batch: list) -> tuple:
 
     waveform_list, waveform_length_list, phoneme_label_list = zip(*batch)
 
-    # Each waveform: [1, T_max]
-    # Result: [B, 1, T_max]
+    # [B, 1, T_max]
     waveform_batch = torch.stack(waveform_list, dim=0)
 
-    # Change to sequence-first feature representation:
-    # [B, 1, T_max] -> [B, T_max, 1]
+    # [B, T_max, 1]
     waveform_batch = waveform_batch.transpose(1, 2)
 
-    # [B]
+    # Original valid waveform lengths
     waveform_lengths = torch.stack(
         waveform_length_list,
         dim=0
     ).to(dtype=torch.long)
 
-    # [B]
+    # -------------------------------------------------------
+    # RZOH padding
+    # -------------------------------------------------------
+    if apply_rzoh:
+
+        rzoh_max_downscale = 128
+
+        current_waveform_length = waveform_batch.shape[1]
+
+        padding_amount = (
+            -current_waveform_length
+        ) % rzoh_max_downscale
+
+        waveform_batch = torch.nn.functional.pad(
+            waveform_batch,
+            pad=(0, 0, 0, padding_amount),
+            mode="constant",
+            value=0.0
+        )
+
+    # Label lengths
     label_lengths = torch.tensor(
         [labels.shape[0] for labels in phoneme_label_list],
         dtype=torch.long
     )
 
-    # [sum(label_lengths)]
     concatenated_labels = torch.cat(
         phoneme_label_list,
         dim=0
@@ -1373,11 +1391,11 @@ def compute_batch_per_from_log_probs(log_probs,
         # Convert both sequences to 39 phonemes
         # ==========================================
 
-        print("BEFORE DECODING:")
-        print(f"pred: {decoded_pred}")
-        print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=61)}")
-        print(f"target: {target_seq}")
-        print(f"{decode_phoneme_sequence(sequence=target_seq, vocab_version=61)}\n")
+        #print("BEFORE DECODING:")
+        #print(f"pred: {decoded_pred}")
+        #print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=61)}")
+        #print(f"target: {target_seq}")
+        #print(f"{decode_phoneme_sequence(sequence=target_seq, vocab_version=61)}\n")
         
 
         if use_vocab_conversion:
@@ -1387,12 +1405,12 @@ def compute_batch_per_from_log_probs(log_probs,
             target_seq = map_phonemes_61_to_39(phoneme_indices=target_seq,
                                                phoneme_mapping=phoneme_mapping)
 
-        print("AFTER DECODING:")
-        print(f"decoded_pred: {decoded_pred}")
-        print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=39)}")
-        print(f"decoded_target: {target_seq}")
-        print(f"{decode_phoneme_sequence(sequence=target_seq, vocab_version=39)}")
-        print("---------------------------")
+        # print("AFTER DECODING:")
+        # print(f"decoded_pred: {decoded_pred}")
+        # print(f"{decode_phoneme_sequence(sequence=decoded_pred, vocab_version=39)}")
+        # print(f"decoded_target: {target_seq}")
+        # print(f"{decode_phoneme_sequence(sequence=target_seq, vocab_version=39)}")
+        # print("---------------------------")
         # input("Press Enter to continue...")
 
         # Calculate edit distance
